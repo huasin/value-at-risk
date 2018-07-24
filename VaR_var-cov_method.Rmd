@@ -18,8 +18,9 @@ En este documento, se importarán datos de acciones entre los años 2014 y 2017 
 Se utilizarán los siguientes paquetes de R:
 
 1. **dplyr**: Principalmente porque permite manejar los datos de una manera fácil mendiante la utilización de funciones como `mutate`, `summarize`, `group_by`, etc. Además se utilizará el *Pipe Operator:* `%>%` para trabajar de forma más ituitiva.
-2. **tidyr**: Para el manejo de datos,es útil para agrupar y desagrupar datos con sus funciones `gather` y `spread`.
+2. **tidyr**: Para el manejo de datos, es útil para agrupar y desagrupar datos con sus funciones `gather` y `spread`.
 3. **ggplot2**: Para la visualización de datos.
+4. **plotly**: Se combina con ggplot, utilizando el comando `ggplotly` para realizar gráficos interactivos.
 4. **quantmod**: Escencial para importar datos financieros y trabajar con series de tiempo.
 
 ```{r, message=FALSE, error=FALSE, warning=FALSE, echo=TRUE}
@@ -27,7 +28,145 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(quantmod)
+library(plotly)
+```
+
+### Importar los datos
+
+La función `getSimbols` permite importar como series de tiempo los datos de las acciones. Para importar mas de una serie de tiempo, se separan por `;`.
+```{r, message=FALSE, warning=FALSE, echo=T}
+getSymbols("AAPL;AMZN;FB;MSFT;NKE", source='yahoo', from=as.Date('2014-01-01'), to=as.Date('2017-12-31'))
+```
+
+Veamos por ejemplo, la serie de tiempo de Apple:
+```{r, echo=T}
+head(AAPL)
+```
+
+Y se puede visualizar, ocupando la función `chartSeries` de quantmod.
+```{r, echo=T}
+chartSeries(AAPL)
+```
+
+Ahora, se ocuparán los precios *Adjusted* para el cáculo del VaR, transformaremos la serie en en data frame y nos quedaremos con la columna Adjusted y una columna Date.
+```{r, echo=T, warning=F}
+NKE <- NKE %>% as.data.frame() %>% mutate(date=index(NKE)) %>% select(date,NKE.Adjusted)
+AMZN <- AMZN %>% as.data.frame() %>% mutate(date=index(AMZN)) %>% select(date,AMZN.Adjusted)
+FB <- FB %>% as.data.frame() %>% mutate(date=index(FB)) %>% select(date,FB.Adjusted)
+MSFT <- MSFT %>% as.data.frame() %>% mutate(date=index(MSFT)) %>% select(date,MSFT.Adjusted)
+AAPL <- AAPL %>% as.data.frame() %>% mutate(date=index(AAPL)) %>% select(date,AAPL.Adjusted)
+
+# veamos Apple ahora
+head(AAPL)
+```
+
+Lo siguiente es realizar un join para tener todos los datos en un data frame. Esto lo hacemos con la función `inner_join` de dplyr.
+```{r, echo=t, warning=F, message=F}
+precios <- NKE %>% 
+    inner_join(AMZN, by='date') %>% 
+    inner_join(FB, by='date') %>%  
+    inner_join(MSFT, by='date') %>% 
+    inner_join(AAPL, by='date') %>% tbl_df
+
+# renombramos las columnas para evitar tener el '.Adjusted'
+colnames(precios) <- c('date','NKE','AMZN','FB','MSFT','AAPL')
+
+#veamos la data
+head(precios)
+```
+
+```{r, echo=F, message=F, warning=F}
+rm(list=colnames(precios))
+```
+
+### Cálculo de retornos
+Se calcularán los retosnos logarítmicos: $r_t=ln(\frac{p_t}{p_{t-1}})$. Se ocupará la función `transmutate` de dplyr para crear las variables y eliminar las restantes.
+```{r, echo=T, message=F, warning=F}
+retornos <- precios %>% transmute(
+    date = date,
+    NKE = log(NKE/lag(NKE)),
+    AAPL = log(AAPL/lag(AAPL)),
+    AMZN = log(AMZN/lag(AMZN)),
+    FB = log(FB/lag(FB)),
+    MSFT = log(MSFT/lag(MSFT))
+)
+
+# veamos la data
+head(retornos)
+```
+
+Ahora visualicemos los retornos de las acciones:
+```{r}
+g1 <- retornos %>% gather(Stock, Return, 2:6) %>% 
+    ggplot(aes(x=date, y=Return, color=Stock)) + geom_line() +
+    theme_test() + xlab('Date') + ggtitle('Retorno de las acciones entre 2014 y 2017')
+
+ggplotly(g1)
+```
+
+### Cálculo del VaR
+Para el cálculo del value at risk, se utilizará la siguiente fórmula:
+
+$$VaR_{t,t+1}=\left(e^{\left(\mu-\frac{\sigma^2}{2}\right)+\sigma\psi}-1\right)M$$
+
+Donde $\mu$ y $\sigma^2$ son la media y la varianza de los retornos logarítmicos, $\psi$ es la inversa de una $N(0,1)$ con probabilidad $\alpha$ y $M$ es la cantidad invertida en el activo. Para este caso utilizaremos un $\alpha=0,05$, por lo que la inversa de la normal de un 95% es $\psi=1,64$ aprox. Además supondremos que se invertirá una cantidad de \$10000 en cada activo.
+
+#### Seteamos los parámetros:
+```{r, echo=T, warning=F, message=F}
+alpha <- .05
+psi <- qnorm(1-alpha)
+M <- 10000
+```
+
+#### Creamos la función del VaR:
+```{r, echo=T, message=F,warning=F}
+varCov <- function(u,sigma,psi,M) {
+    return(
+        (exp((u-sigma^2/2)+sigma*psi)-1)*M
+    )
+}
+```
+
+#### Cálculo con ventana móvil:
+Se iterará con dos ciclos, uno para cada stock y otro para cada día:
+```{r, echo=T, message=F,warning=F}
+# Se crea una matriz que almacenará los VaR para cada acción desde 2016 a 2017
+VAR <- matrix(1:503, nrow = 503, ncol = 5)
+colnames(VAR) <- colnames(retornos[,2:6])
+
+# Se realiza el loop
+for (s in 1:5) {    
+    for (i in VAR[,s]) {
+        u <- mean(retornos[i:(i+503),][[s+1]], na.rm = T)
+        sigma <- sd(retornos[i:(i+503),][[s+1]], na.rm = T)
+        VAR[i,s]=varCov(u,sigma,psi,M)
+    }
+}
+
+# veamos la matriz de VaR
+head(VAR)
+```
+
+Luego, se crea un data frame con la fecha(date) y el VaR de cada acción
+```{r, echo=T, message=F,warning=F}
+# se transforma en data frame la matriz VAR
+VAR <- data.frame(VAR)
+# se combina la data para obtener date y VaR de cada acción
+VAR <- cbind(date=retornos[505:1007,1],VAR) %>% tbl_df
+
+# veamos la data
+head(VAR)
+```
+
+#### Visualización del VaR
+Finalmente, podemos ver gráficamente el VaR de cada acción, agrupando la data con `gather` para gráficar más fácimente:
+
+```{r, echo=T, message=F, warning=F}
+g2 <- VAR %>% gather(Stock, VaR, 2:6) %>% 
+    ggplot(aes(x=date, y=VaR, color=Stock)) + geom_line() + theme_test() + xlab('Date') + ggtitle('Value at Risk')
+
+ggplotly(g2)
 ```
 
 
-
+**Nota:** Esto es parte de una tarea para el ramos de Finanza II. Cualquier consulta sobre el código a <elias.alegria@ug.uchile.cl>
