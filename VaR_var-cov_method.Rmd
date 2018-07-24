@@ -1,0 +1,33 @@
+---
+title: "Value at Risk, método de varianza-covarianza"
+author: "Elias Alegria Pavez (<elias.alegria@ug.uchile.cl>)"
+date: "24 de julio de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introducción
+
+En este documento, se importarán datos de acciones entre los años 2014 y 2017 con la finalidad de calcular el Value at Risk (VaR) para los años 2016 y 2017 con una ventana móvil de 504 días (dos años en días transables), mediante el método de varianza-covarianza.
+
+## Packetes a utilizar
+
+Se utilizarán los siguientes paquetes de R:
+
+1. **dplyr**: Principalmente porque permite manejar los datos de una manera fácil mendiante la utilización de funciones como `mutate`, `summarize`, `group_by`, etc. Además se utilizará el *Pipe Operator:* `%>%` para trabajar de forma más ituitiva.
+2. **tidyr**: Para el manejo de datos,es útil para agrupar y desagrupar datos con sus funciones `gather` y `spread`.
+3. **ggplot2**: Para la visualización de datos.
+4. **quantmod**: Escencial para importar datos financieros y trabajar con series de tiempo.
+
+```{r, message=FALSE, error=FALSE, warning=FALSE, echo=TRUE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(quantmod)
+```
+
+
+
